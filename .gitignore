@@ -1,0 +1,47 @@
+# 🔒 Environment variables
+.env
+.env.*
+
+# 🐍 Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyc.*
+
+# 📦 Virtual environments
+venv/
+.env/
+.venv/
+env/
+
+# 🧪 Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# 📊 Streamlit cache
+.streamlit/
+
+# 📁 Logs
+*.log
+
+# 🧾 OS files
+.DS_Store
+Thumbs.db
+
+# 🧰 VS Code settings
+.vscode/
+
+# 📦 Build / distribution
+build/
+dist/
+*.egg-info/
+
+# 🔍 FAISS index files (optional - remove if you want to persist)
+*.faiss
+*.pkl
+
+# 🔐 API keys / secrets
+secrets.toml
+
+# 🧠 LangChain cache (if used)
+.cache/
