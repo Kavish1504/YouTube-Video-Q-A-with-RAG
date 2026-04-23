@@ -1,17 +1,18 @@
 import streamlit as st
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.chains import RetrievalQA
+from langchain_core.documents import Document
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
     NoTranscriptFound,
     VideoUnavailable,
 )
-from langchain_core.documents import Document
 import os
 import re
 from dotenv import load_dotenv
@@ -46,65 +47,37 @@ def extract_video_id(url):
 
 
 def snippets_to_text(fetched_transcript) -> str:
-    """
-    Works with both old (list of dicts) and new (FetchedTranscript with .snippets)
-    response formats from youtube-transcript-api.
-    """
-    # v1.0+ returns a FetchedTranscript object with a .snippets attribute
     if hasattr(fetched_transcript, "snippets"):
         return " ".join(s.text for s in fetched_transcript.snippets)
-    # older versions returned a plain list of dicts
     return " ".join(t["text"] for t in fetched_transcript)
 
 
 def fetch_transcript(video_id: str):
-    """
-    Uses the v1.0+ instance-based API: YouTubeTranscriptApi().fetch(...)
-    Falls back through: English → any manual → any auto-generated transcript.
-    """
     api = YouTubeTranscriptApi()
 
-    # 1. Try English first
     try:
         return api.fetch(video_id, languages=["en", "en-US", "en-GB"])
     except NoTranscriptFound:
         pass
     except TranscriptsDisabled:
-        raise RuntimeError(
-            "Transcripts are disabled for this video. "
-            "The uploader has turned off captions."
-        )
+        raise RuntimeError("Transcripts are disabled for this video.")
     except VideoUnavailable:
-        raise RuntimeError(
-            "This video is unavailable. It may be private, deleted, or region-locked."
-        )
+        raise RuntimeError("This video is unavailable (private, deleted, or region-locked).")
 
-    # 2 & 3. Fall back to any available transcript
     try:
         transcript_list = api.list(video_id)
-
-        # Prefer manually created, then auto-generated
         for want_generated in [False, True]:
             for t in transcript_list:
                 if t.is_generated == want_generated:
                     return t.fetch()
-
     except TranscriptsDisabled:
-        raise RuntimeError(
-            "Transcripts are disabled for this video. "
-            "The uploader has turned off captions."
-        )
+        raise RuntimeError("Transcripts are disabled for this video.")
     except VideoUnavailable:
-        raise RuntimeError(
-            "This video is unavailable. It may be private, deleted, or region-locked."
-        )
+        raise RuntimeError("This video is unavailable (private, deleted, or region-locked).")
     except Exception as e:
         raise RuntimeError(f"Could not list transcripts: {e}")
 
-    raise RuntimeError(
-        "No transcript found for this video. "
-        "Try a video that has captions or subtitles enabled."
-    )
+    raise RuntimeError("No transcript found. Try a video with captions enabled.")
 
 
 def load_and_index(url: str):
@@ -125,15 +98,13 @@ def load_and_index(url: str):
 
         text = snippets_to_text(transcript)
         if not text.strip():
-            st.error("❌ Transcript is empty. The video may have no spoken content.")
+            st.error("❌ Transcript is empty.")
             return None, None
 
         docs = [Document(page_content=text)]
 
     with st.spinner("Chunking text..."):
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, chunk_overlap=200
-        )
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         chunks = text_splitter.split_documents(docs)
 
     with st.spinner("🔢 Creating embeddings..."):
@@ -144,25 +115,25 @@ def load_and_index(url: str):
 
 
 def summarize(chunks, llm):
-    sample_text = [c.page_content for c in chunks[:5]]
-    prompt = f"""
+    sample_text = " ".join([c.page_content for c in chunks[:5]])
+    prompt = ChatPromptTemplate.from_template("""
 You are a helpful assistant. Given the following transcript excerpt from a YouTube video,
 write a concise 5-bullet summary covering the main topics discussed.
 
 Transcript:
-{sample_text}
+{text}
 
-Summary (5 bullets):"""
-    return llm.invoke(prompt).content
+Summary (5 bullets):""")
+    chain = prompt | llm | StrOutputParser()
+    return chain.invoke({"text": sample_text})
 
 
 def build_qa_chain(db, model_name):
     llm = ChatGroq(model=model_name, temperature=0)
     retriever = db.as_retriever(search_kwargs={"k": 4})
 
-    prompt_template = PromptTemplate(
-        input_variables=["context", "question"],
-        template="""You are an expert assistant helping users understand a YouTube video.
+    prompt = ChatPromptTemplate.from_template("""
+You are an expert assistant helping users understand a YouTube video.
 
 IMPORTANT:
 - Always answer in English.
@@ -173,15 +144,19 @@ Context:
 
 Question: {question}
 
-Answer (in English):""",
+Answer (in English):""")
+
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    # Modern LCEL chain — no deprecated RetrievalQA
+    chain = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
     )
 
-    chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=retriever,
-        chain_type="stuff",
-        chain_type_kwargs={"prompt": prompt_template},
-    )
     return chain, llm
 
 
@@ -201,9 +176,7 @@ with st.sidebar:
     )
 
     st.divider()
-    url = st.text_input(
-        "YouTube Video URL", placeholder="https://www.youtube.com/watch?v=..."
-    )
+    url = st.text_input("YouTube Video URL", placeholder="https://www.youtube.com/watch?v=...")
 
     if st.button("Load and Index", use_container_width=True):
         if not api_key:
@@ -251,8 +224,8 @@ if st.session_state.vectorstore:
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                result = st.session_state.chain.invoke({"query": question})
-                answer = result["result"]
+                # LCEL chain takes the question string directly
+                answer = st.session_state.chain.invoke(question)
             st.write(answer)
             st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
