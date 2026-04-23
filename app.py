@@ -4,14 +4,14 @@ from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.chains import RetrievalQA
+from langchain_community.chains import RetrievalQA
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
     NoTranscriptFound,
     VideoUnavailable,
 )
-from langchain.schema import Document
+from langchain_core.documents import Document
 import os
 import re
 from dotenv import load_dotenv
