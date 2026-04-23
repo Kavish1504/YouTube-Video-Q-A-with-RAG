@@ -19,6 +19,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Load GROQ key from Streamlit secrets (Cloud) or .env (local)
+def get_groq_api_key() -> str:
+    try:
+        return st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        return os.getenv("GROQ_API_KEY", "")
+
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 
@@ -163,8 +170,11 @@ Answer (in English):""")
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Setup")
+    # Pre-fill from .env (local) or st.secrets (Streamlit Cloud)
+    default_key = get_groq_api_key()
     api_key = st.text_input(
-        "GROQ API Key", value=os.getenv("GROQ_API_KEY", ""), type="password"
+        "GROQ API Key", value=default_key, type="password",
+        help="Loaded automatically from .env or Streamlit secrets if set."
     )
 
     if api_key:
