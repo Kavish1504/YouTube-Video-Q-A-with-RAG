@@ -27,17 +27,19 @@ An interactive Streamlit application that allows users to:
 - Embeddings: HuggingFace (all-MiniLM-L6-v2)  
 - Vector DB: FAISS  
 - Framework: LangChain  
-- Transcript API: youtube-transcript-api  
+- Transcript API: youtube-transcript-api (v1.0+)  
 
 ---
 
 ## 📂 Project Structure
 
+```
 YouTube-RAG/
-│── app.py  
-│── .env  
-│── requirements.txt  
-│── README.md  
+│── app.py
+│── .env
+│── requirements.txt
+│── README.md
+```
 
 ---
 
@@ -45,23 +47,25 @@ YouTube-RAG/
 
 ### 1. Clone the repository
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Kavish1504/YouTube-Video-Q-A-with-RAG
 cd YouTube-RAG
 ```
-
 
 ### 2. Create virtual environment
 ```bash
 python -m venv venv
-venv\Scripts\activate
-```
 
+# Windows
+venv\Scripts\activate
+
+# macOS / Linux
+source venv/bin/activate
+```
 
 ### 3. Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
-
 
 ---
 
@@ -72,14 +76,12 @@ Create a `.env` file and add:
 GROQ_API_KEY=your_api_key_here
 ```
 
-
 ---
 
 ## ▶️ Run the App
 ```bash
 streamlit run app.py
 ```
-
 
 ---
 
@@ -100,6 +102,7 @@ streamlit run app.py
 - YouTube may block transcript requests (IP-based restriction)  
 - Some videos may not have transcripts available  
 - Auto-generated transcripts may be noisy  
+- `youtube-transcript-api` v1.0+ removed the old static methods (`get_transcript`, `list_transcripts`) — ensure you are on the latest version: `pip install -U youtube-transcript-api`  
 
 ---
 
@@ -117,11 +120,6 @@ streamlit run app.py
 
 Pull requests are welcome. For major changes, please open an issue first.
 
----
-
-## 📄 License
-
-This project is open-source and available under the MIT License.
 
 ---
 
