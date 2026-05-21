@@ -1,7 +1,7 @@
 streamlit
 langchain-core==0.3.28
-langchain-community==0.3.14
 langchain-groq==0.2.3
+langchain-community==0.3.14
 langchain-huggingface==0.1.2
 langchain-text-splitters==0.3.4
 faiss-cpu
@@ -10,3 +10,4 @@ yt-dlp
 requests
 python-dotenv
 sentence-transformers
+huggingface-hub==0.23.4
