@@ -5,7 +5,7 @@ langchain-community>=0.3.14,<0.4.0
 langchain-huggingface>=0.1.2,<0.2.0
 langchain-text-splitters>=0.3.4,<0.4.0
 langchain>=0.3.14,<0.4.0
-faiss-cpu==1.7.4
+faiss-cpu
 youtube-transcript-api
 yt-dlp
 requests
