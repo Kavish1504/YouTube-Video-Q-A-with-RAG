@@ -13,33 +13,38 @@ from youtube_transcript_api import (
     NoTranscriptFound,
     VideoUnavailable,
 )
+import yt_dlp
+import requests
 import os
 import re
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Load GROQ key from Streamlit secrets (Cloud) or .env (local)
+
+# ── API Key ───────────────────────────────────────────────────────────────────
 def get_groq_api_key() -> str:
     try:
         return st.secrets.get("GROQ_API_KEY", "")
     except Exception:
         return os.getenv("GROQ_API_KEY", "")
 
+
+# ── Session State ─────────────────────────────────────────────────────────────
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
-
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-
 if "summary" not in st.session_state:
     st.session_state.summary = None
 
+# ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="YouTube RAG", page_icon="🎬", layout="wide")
 st.title("🎬 YouTube Video Q&A with RAG")
 st.caption("Paste a YouTube URL, get a summary, then ask anything about the video.")
 
 
+# ── URL Parsing ───────────────────────────────────────────────────────────────
 def extract_video_id(url):
     patterns = [
         r"v=([^&]+)",
@@ -53,42 +58,135 @@ def extract_video_id(url):
     return None
 
 
+# ── Transcript Helpers ────────────────────────────────────────────────────────
 def snippets_to_text(fetched_transcript) -> str:
+    """Handle all transcript formats returned by any fetch method."""
+    if isinstance(fetched_transcript, list):
+        if not fetched_transcript:
+            return ""
+        first = fetched_transcript[0]
+        if isinstance(first, dict):
+            return " ".join(t.get("text", "") for t in fetched_transcript)
     if hasattr(fetched_transcript, "snippets"):
         return " ".join(s.text for s in fetched_transcript.snippets)
     return " ".join(t["text"] for t in fetched_transcript)
 
 
+def fetch_via_ytdlp(video_id: str) -> list:
+    """
+    Fetch transcript using yt-dlp.
+    Bypasses YouTube IP blocks entirely — most reliable method.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    ydl_opts = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["en", "en-US"],
+        "quiet": True,
+        "no_warnings": True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+        # Try manual subtitles first, then auto-generated captions
+        for caption_type in ["subtitles", "automatic_captions"]:
+            captions = info.get(caption_type, {})
+            for lang in ["en", "en-US", "en-GB", "en-orig"]:
+                if lang not in captions:
+                    continue
+                entries = captions[lang]
+                for fmt in entries:
+                    # --- JSON3: richest format ---
+                    if fmt.get("ext") == "json3":
+                        try:
+                            resp = requests.get(fmt["url"], timeout=15)
+                            data = resp.json()
+                            events = data.get("events", [])
+                            transcript = []
+                            for event in events:
+                                segs = event.get("segs", [])
+                                text = "".join(
+                                    s.get("utf8", "") for s in segs
+                                ).strip()
+                                if text and text != "\n":
+                                    transcript.append(
+                                        {
+                                            "text": text,
+                                            "start": event.get("tStartMs", 0) / 1000,
+                                        }
+                                    )
+                            if transcript:
+                                return transcript
+                        except Exception:
+                            continue
+
+                    # --- VTT / SRV fallback ---
+                    elif fmt.get("ext") in ["vtt", "srv3", "srv2", "srv1"]:
+                        try:
+                            resp = requests.get(fmt["url"], timeout=15)
+                            lines = resp.text.splitlines()
+                            text_lines = [
+                                l.strip()
+                                for l in lines
+                                if l.strip()
+                                and not l.startswith("WEBVTT")
+                                and not l.startswith("NOTE")
+                                and "-->" not in l
+                                and not l.strip().isdigit()
+                            ]
+                            combined = " ".join(text_lines)
+                            if combined:
+                                return [{"text": combined}]
+                        except Exception:
+                            continue
+
+    raise RuntimeError(
+        "yt-dlp could not find any English captions. "
+        "The video may not have subtitles enabled."
+    )
+
+
 def fetch_transcript(video_id: str):
-    api = YouTubeTranscriptApi()
+    """
+    3-layer fallback for maximum reliability:
+      1. youtube-transcript-api  (fast, direct)
+      2. youtube-transcript-api with cookies.txt  (if IP blocked)
+      3. yt-dlp  (bypasses all IP restrictions — interview-safe)
+    """
 
+    # --- Layer 1: Direct API ---
     try:
+        api = YouTubeTranscriptApi()
         return api.fetch(video_id, languages=["en", "en-US", "en-GB"])
-    except NoTranscriptFound:
-        pass
-    except TranscriptsDisabled:
-        raise RuntimeError("Transcripts are disabled for this video.")
-    except VideoUnavailable:
-        raise RuntimeError("This video is unavailable (private, deleted, or region-locked).")
+    except (TranscriptsDisabled, VideoUnavailable) as e:
+        raise RuntimeError(str(e))
+    except Exception:
+        pass  # IP blocked or not found → try next layer
 
+    # --- Layer 2: With cookies (if cookies.txt present) ---
+    cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+    if os.path.exists(cookie_path):
+        try:
+            api = YouTubeTranscriptApi(cookie_path=cookie_path)
+            return api.fetch(video_id, languages=["en", "en-US", "en-GB"])
+        except Exception:
+            pass  # cookies expired → try next layer
+
+    # --- Layer 3: yt-dlp (most reliable) ---
     try:
-        transcript_list = api.list(video_id)
-        for want_generated in [False, True]:
-            for t in transcript_list:
-                if t.is_generated == want_generated:
-                    return t.fetch()
-    except TranscriptsDisabled:
-        raise RuntimeError("Transcripts are disabled for this video.")
-    except VideoUnavailable:
-        raise RuntimeError("This video is unavailable (private, deleted, or region-locked).")
+        return fetch_via_ytdlp(video_id)
+    except RuntimeError:
+        raise
     except Exception as e:
-        raise RuntimeError(f"Could not list transcripts: {e}")
-
-    raise RuntimeError("No transcript found. Try a video with captions enabled.")
+        raise RuntimeError(f"All transcript methods failed: {e}")
 
 
+# ── Indexing ──────────────────────────────────────────────────────────────────
 def load_and_index(url: str):
-    with st.spinner("⏳ Loading transcript..."):
+    with st.spinner("⏳ Fetching transcript..."):
         video_id = extract_video_id(url)
         if not video_id:
             st.error("❌ Invalid YouTube URL. Please check the link and try again.")
@@ -110,8 +208,10 @@ def load_and_index(url: str):
 
         docs = [Document(page_content=text)]
 
-    with st.spinner("Chunking text..."):
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    with st.spinner("✂️ Chunking text..."):
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000, chunk_overlap=200
+        )
         chunks = text_splitter.split_documents(docs)
 
     with st.spinner("🔢 Creating embeddings..."):
@@ -121,6 +221,7 @@ def load_and_index(url: str):
     return db, chunks
 
 
+# ── Summarisation ─────────────────────────────────────────────────────────────
 def summarize(chunks, llm):
     sample_text = " ".join([c.page_content for c in chunks[:5]])
     prompt = ChatPromptTemplate.from_template("""
@@ -135,6 +236,7 @@ Summary (5 bullets):""")
     return chain.invoke({"text": sample_text})
 
 
+# ── QA Chain ──────────────────────────────────────────────────────────────────
 def build_qa_chain(db, model_name):
     llm = ChatGroq(model=model_name, temperature=0)
     retriever = db.as_retriever(search_kwargs={"k": 4})
@@ -156,7 +258,6 @@ Answer (in English):""")
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
-    # Modern LCEL chain — no deprecated RetrievalQA
     chain = (
         {"context": retriever | format_docs, "question": RunnablePassthrough()}
         | prompt
@@ -169,12 +270,14 @@ Answer (in English):""")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Setup")
-    # Pre-fill from .env (local) or st.secrets (Streamlit Cloud)
+    st.header("⚙️ Setup")
+
     default_key = get_groq_api_key()
     api_key = st.text_input(
-        "GROQ API Key", value=default_key, type="password",
-        help="Loaded automatically from .env or Streamlit secrets if set."
+        "GROQ API Key",
+        value=default_key,
+        type="password",
+        help="Loaded automatically from .env or Streamlit secrets if set.",
     )
 
     if api_key:
@@ -182,13 +285,21 @@ with st.sidebar:
 
     model_name = st.selectbox(
         "Groq Model",
-        ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it", "mixtral-8x7b-32768"],
+        [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "gemma2-9b-it",
+            "mixtral-8x7b-32768",
+        ],
     )
 
     st.divider()
-    url = st.text_input("YouTube Video URL", placeholder="https://www.youtube.com/watch?v=...")
+    url = st.text_input(
+        "YouTube Video URL",
+        placeholder="https://www.youtube.com/watch?v=...",
+    )
 
-    if st.button("Load and Index", use_container_width=True):
+    if st.button("🚀 Load and Index", use_container_width=True):
         if not api_key:
             st.error("Please enter your GROQ API key.")
         elif not url:
@@ -213,14 +324,19 @@ with st.sidebar:
             st.session_state.summary = None
             st.rerun()
 
+    st.divider()
+    st.caption("💡 Tip: Add a `cookies.txt` file to your project folder for extra reliability.")
+
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 if st.session_state.summary:
-    with st.expander("Auto-generated summary", expanded=True):
+    with st.expander("📋 Auto-generated Summary", expanded=True):
         st.markdown(st.session_state.summary)
+
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
 if st.session_state.vectorstore:
-    st.subheader("Ask anything about the video")
+    st.subheader("💬 Ask anything about the video")
 
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
@@ -234,10 +350,11 @@ if st.session_state.vectorstore:
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                # LCEL chain takes the question string directly
                 answer = st.session_state.chain.invoke(question)
             st.write(answer)
-            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            st.session_state.chat_history.append(
+                {"role": "assistant", "content": answer}
+            )
 
 else:
     st.info("👈 Enter a YouTube URL in the sidebar and click **Load and Index** to get started.")
